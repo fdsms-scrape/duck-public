@@ -15,6 +15,7 @@ class PlayerContext:
     corn: int
     duck_slots_count: int
     clan_id: int | None
+    egg_slots: list[int] = field(default_factory=list)
     alerts: list[dict[str, Any]] = field(default_factory=list)
 
     @property

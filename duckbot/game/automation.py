@@ -116,6 +116,7 @@ class DuckAutomation:
                     else None
                 ),
                 include_clan_tasks=player_context.has_clan,
+                active_slots=player_context.egg_slots,
             )
 
         tournament_context = None
