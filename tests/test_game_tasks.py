@@ -7,6 +7,7 @@ from duckbot.game.task_service import (
     TaskService,
     get_claimable_task_codes,
     get_custom_reward_tasks,
+    is_standard_reward_task_claimable,
     pick_custom_task_slot_ids,
 )
 
@@ -115,6 +116,12 @@ class TaskHelpersTests(unittest.TestCase):
         tasks = [
             {"code": "duck-feed-chain", "state": 3, "type": "DUCK_FEED"},
             {
+                "code": "group-points-daily",
+                "state": 3,
+                "type": "GROUP_POINTS_DAILY",
+                "criteria": {"groupCodes": ["regTourMicroCommonGr1"]},
+            },
+            {
                 "code": "egg-group",
                 "state": 3,
                 "type": "EGG_GROUP_TASK",
@@ -125,6 +132,79 @@ class TaskHelpersTests(unittest.TestCase):
         custom_tasks = get_custom_reward_tasks(tasks)
 
         self.assertEqual([task["code"] for task in custom_tasks], ["egg-group"])
+
+    def test_state_three_non_custom_task_is_claimable_via_standard_reward(self) -> None:
+        task = {
+            "code": "cS1P4t2",
+            "state": 3,
+            "type": "DUCK_FEED",
+            "value": 35,
+            "progress": 35,
+            "reward": [{"type": "GROUP_POINTS", "value": 20}],
+        }
+
+        self.assertTrue(is_standard_reward_task_claimable(task))
+
+    def test_state_three_custom_egg_group_task_is_not_claimable_via_standard_reward(self) -> None:
+        task = {
+            "code": "regTourMicroEpic24",
+            "state": 3,
+            "type": "EGG_GROUP_TASK",
+            "value": 0,
+            "progress": 0,
+            "reward": [{"type": "SPECIAL_RESOURCE", "value": 20, "code": "regular"}],
+            "criteria": [{"eggType": "REGULAR_TOURNAMENT_EGG", "eggLevel": [5], "value": 1}],
+        }
+
+        self.assertFalse(is_standard_reward_task_claimable(task))
+
+    def test_collect_standard_rewards_claims_state_three_non_custom_task(self) -> None:
+        service = _StubTaskService([{"result": True}])
+        category_payloads = {
+            "PLAYER": {
+                "response": {
+                    "tasks": [
+                        {
+                            "code": "cS1P4t2",
+                            "state": 3,
+                            "type": "DUCK_FEED",
+                            "value": 35,
+                            "progress": 35,
+                            "reward": [{"type": "GROUP_POINTS", "value": 20}],
+                        },
+                        {
+                            "code": "regTourMicroEpic24",
+                            "state": 3,
+                            "type": "EGG_GROUP_TASK",
+                            "value": 0,
+                            "progress": 0,
+                            "reward": [{"type": "SPECIAL_RESOURCE", "value": 20, "code": "regular"}],
+                            "criteria": [{"eggType": "REGULAR_TOURNAMENT_EGG", "eggLevel": [5], "value": 1}],
+                        },
+                    ]
+                }
+            }
+        }
+
+        collected_count = service.collect_standard_rewards(category_payloads)
+
+        self.assertEqual(collected_count, 1)
+        self.assertEqual(service.calls, [("/tasks/reward", {"code": "cS1P4t2"})])
+        self.assertEqual(service.sleep_calls, 1)
+
+    def test_pick_custom_task_slot_ids_ignores_non_dict_criteria_items(self) -> None:
+        task = {
+            "code": "egg-group",
+            "criteria": [
+                "unexpected",
+                {"eggType": "DUCK", "eggLevel": [5], "value": 1},
+            ],
+        }
+        eggs = [{"slot": 21, "type": "DUCK", "level": 5}]
+
+        slot_ids = pick_custom_task_slot_ids(task, eggs, max_merge_slot=25)
+
+        self.assertEqual(slot_ids, [21])
 
     def test_collect_custom_rewards_stops_after_first_failed_reward(self) -> None:
         service = _StubTaskService([None])

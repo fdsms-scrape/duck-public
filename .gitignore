@@ -12,3 +12,7 @@ profiles.local.yaml
 runtime/
 logs/
 url.txt
+resp.txt
+ffffff.py
+tmp_webapp/
+tmp_webapp_all/

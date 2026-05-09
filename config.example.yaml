@@ -4,6 +4,7 @@ cycle_sleep_seconds: 1800
 between_profiles_delay_seconds: [5, 10]
 between_actions_delay_seconds: [0.5, 1.0]
 after_feed_delay_seconds: [1.0, 2.0]
+after_egg_merge_delay_seconds: [1.0, 2.0]
 
 logging:
   level: "INFO"
@@ -23,16 +24,29 @@ auth:
 
 features:
   process_eggs: false
+  participate_egg_tournaments: true
   collect_alert_rewards: true
   collect_task_rewards: true
   collect_custom_task_rewards: false
+  collect_reward_pass_rewards: true
   inspect_tournaments: true
   inspect_clan_show: true
+  use_clan_show_sabotages: false
 
 game:
   max_merge_slot: 25
+  egg_merge_limits:
+    DUCK: 12
+    HEART: 12
+    REGULAR_TOURNAMENT_EGG: 5
+    REGULAR_TOUR_REPEATABLE_EGG: 5
   clan_show_log_best_targets_limit: 3
   clan_show_log_recent_attacks_limit: 3
+  clan_show_attack_limit_per_cycle: 1
+  clan_show_attack_min_success_chance: 0.75
+  clan_show_attack_max_revenge_chance: 0.60
+  clan_show_attack_require_same_group: true
+  clan_show_attack_refresh_targets_each_use: true
   feed_rules:
     COMMON: [30, 30, 30, 30, 30]
     UNCOMMON: [80, 80, 80, 80, 80]

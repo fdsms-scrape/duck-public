@@ -11,6 +11,7 @@ TASK_CATEGORY_PLAYER = "PLAYER"
 TASK_CATEGORY_CLAN = "CLAN"
 READY_TASK_STATE = 2
 CUSTOM_READY_TASK_STATE = 3
+STANDARD_REWARD_STATES = {READY_TASK_STATE, CUSTOM_READY_TASK_STATE}
 
 
 def _to_int(value: Any) -> int | None:
@@ -30,9 +31,22 @@ def count_task_states(tasks: list[dict[str, Any]]) -> dict[int, int]:
     return dict(Counter(int(task.get("state") or 0) for task in tasks))
 
 
+def is_custom_reward_task(task: dict[str, Any]) -> bool:
+    """Определяет задачи, которые нужно забирать через `/tasks/reward/custom`."""
+    return bool(
+        task.get("state") == CUSTOM_READY_TASK_STATE
+        and task.get("code")
+        and task.get("type") == "EGG_GROUP_TASK"
+        and isinstance(task.get("criteria"), list)
+    )
+
+
 def is_standard_reward_task_claimable(task: dict[str, Any]) -> bool:
     """Пытается консервативно определить, можно ли безопасно забирать обычную награду."""
-    if task.get("state") != READY_TASK_STATE or not task.get("code"):
+    if task.get("state") not in STANDARD_REWARD_STATES or not task.get("code"):
+        return False
+
+    if is_custom_reward_task(task):
         return False
 
     rewards = task.get("reward") or []
@@ -61,11 +75,7 @@ def get_claimable_task_codes(tasks: list[dict[str, Any]]) -> list[str]:
 
 def get_custom_reward_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Выделяет кастомные задачи, которые требуют `tasks/reward/custom`."""
-    return [
-        task
-        for task in tasks
-        if task.get("state") == CUSTOM_READY_TASK_STATE and task.get("code") and task.get("criteria")
-    ]
+    return [task for task in tasks if is_custom_reward_task(task)]
 
 
 def pick_custom_task_slot_ids(
@@ -86,6 +96,8 @@ def pick_custom_task_slot_ids(
     used_slots: set[int] = set()
 
     for criterion in criteria:
+        if not isinstance(criterion, dict):
+            continue
         egg_type = criterion.get("eggType")
         levels = set(criterion.get("eggLevel") or [])
         count = int(criterion.get("value") or 0)
@@ -158,17 +170,20 @@ class TaskService(GameService):
             skipped_tasks = [
                 task
                 for task in tasks
-                if task.get("state") == READY_TASK_STATE
+                if task.get("state") in STANDARD_REWARD_STATES
                 and task.get("code")
+                and not is_custom_reward_task(task)
                 and not is_standard_reward_task_claimable(task)
             ]
 
             if skipped_tasks:
                 skipped_by_type = dict(Counter(str(task.get("type") or "UNKNOWN") for task in skipped_tasks))
+                skipped_by_state = dict(Counter(int(task.get("state") or 0) for task in skipped_tasks))
                 self.logger.info(
-                    "Пропускаем %s задач state=2 из категории %s: они не выглядят готовыми к безопасному автосбору, типы=%s",
+                    "Пропускаем %s задач для /tasks/reward из категории %s: они не выглядят готовыми к безопасному автосбору, состояния=%s, типы=%s",
                     len(skipped_tasks),
                     category.lower(),
+                    skipped_by_state,
                     skipped_by_type,
                 )
 

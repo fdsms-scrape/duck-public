@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from duckbot.constants import DEFAULT_EGG_MERGE_LIMITS
+from duckbot.game.alerts_service import iter_confirmable_alert_actions
 from duckbot.game.base import GameService
 from duckbot.game.task_service import extract_tasks, get_custom_reward_tasks, pick_custom_task_slot_ids
 
@@ -64,7 +66,7 @@ def is_egg_merge_allowed(egg: dict[str, Any], egg_merge_limits: dict[str, int]) 
         if "TOURNAMENT_EGG" in egg_type or "REPEATABLE_EGG" in egg_type:
             max_level = 5
         else:
-            return False
+            max_level = DEFAULT_EGG_MERGE_LIMITS["DUCK"]
     return 1 <= _egg_level(egg) < max_level
 
 
@@ -183,6 +185,7 @@ class EggService(GameService):
                     int(inventory_tournament_egg["id"]),
                     int(inventory_tournament_egg.get("queue") or 1),
                 ):
+                    self._collect_open_alert_rewards(_egg_type(inventory_tournament_egg))
                     self.logger.info(
                         "Открыли инвентарное турнирное яйцо %s уровня %s в слоте %s, потому что участие в яйцевом турнире отключено",
                         inventory_tournament_egg["type"],
@@ -201,12 +204,18 @@ class EggService(GameService):
                 and _egg_slot(egg) in active_slot_set
                 and _egg_slot(egg) not in reserved_slots
             ]
+            occupied_active_slots = {
+                _egg_slot(egg)
+                for egg in eggs
+                if egg.get("id") and _egg_slot(egg) in active_slot_set
+            }
             eggs_by_slot = {_egg_slot(egg): egg for egg in valid_eggs}
             queue_eggs = [
                 egg
                 for egg in eggs
-                if egg.get("id") and _egg_slot(egg) > self.settings.game.max_merge_slot
+                if egg.get("id") and _egg_slot(egg) not in active_slot_set
             ]
+            free_active_slots = sorted(active_slot_set.difference(occupied_active_slots))
 
             if current_task_payloads and not custom_reward_stop:
                 submission = find_custom_task_submission(
@@ -251,6 +260,7 @@ class EggService(GameService):
                     int(ready_cooldown_egg["id"]),
                     int(ready_cooldown_egg.get("queue") or 1),
                 ):
+                    self._collect_open_alert_rewards(_egg_type(ready_cooldown_egg))
                     self.logger.info(
                         "Открыли яйцо с откатом %s в слоте %s",
                         _egg_type(ready_cooldown_egg),
@@ -269,7 +279,9 @@ class EggService(GameService):
                     base_egg["level"],
                 )
                 merge_count += 1
-                self.sleep_range(self.settings.between_actions_delay_seconds)
+                if current_task_payloads and not custom_reward_stop:
+                    current_task_payloads = self._fetch_task_categories(include_clan_tasks)
+                self.sleep_range(self.settings.after_egg_merge_delay_seconds)
                 continue
 
             level_12_standard = [
@@ -280,12 +292,13 @@ class EggService(GameService):
             if level_12_standard:
                 egg = level_12_standard[0]
                 if self._open_egg(_egg_slot(egg), int(egg["id"]), int(egg.get("queue") or 1)):
+                    self._collect_open_alert_rewards(_egg_type(egg))
                     self.logger.info("Открыли яйцо %s 12 уровня", egg["type"])
                     open_count += 1
                     self.sleep_range(self.settings.after_feed_delay_seconds)
                     continue
 
-            if len(valid_eggs) >= self.settings.game.max_merge_slot:
+            if queue_eggs and not free_active_slots:
                 standard_eggs = [egg for egg in valid_eggs if _egg_type(egg) in {"DUCK", "HEART"}]
                 if standard_eggs:
                     sacrificial_egg = min(
@@ -301,6 +314,7 @@ class EggService(GameService):
                         int(sacrificial_egg["id"]),
                         int(sacrificial_egg.get("queue") or 1),
                     ):
+                        self._collect_open_alert_rewards(_egg_type(sacrificial_egg))
                         self.logger.info(
                             "Аварийно открыли %s в слоте %s",
                             sacrificial_egg["type"],
@@ -325,7 +339,6 @@ class EggService(GameService):
                     descriptions,
                 )
 
-            free_active_slots = sorted(active_slot_set.difference({_egg_slot(egg) for egg in valid_eggs}))
             if queue_eggs and not free_active_slots:
                 self.logger.info(
                     "Дальнейшая обработка очереди остановлена: все открытые egg-слоты заняты, свободных слотов нет. Открытых слотов=%s, яиц в очереди=%s.",
@@ -364,3 +377,23 @@ class EggService(GameService):
             {"value": slot, "queue": queue, "eggId": egg_id},
         )
         return bool(response and response.get("result") is True)
+
+    def _collect_open_alert_rewards(self, egg_type: str) -> int:
+        if egg_type == "HEART" or not self.settings.features.collect_alert_rewards:
+            return 0
+
+        alert_payload = self.safe_post("/alert", {})
+        alerts = (alert_payload or {}).get("response") or []
+        collected_count = 0
+        for action in iter_confirmable_alert_actions(alerts):
+            response = self.safe_post(action["path"], action["payload"])
+            if not response:
+                continue
+            collected_count += 1
+            self.logger.info(
+                "Сразу подтвердили алерт после открытия яйца: %s (%s)",
+                action["alert_name"],
+                action["alert_id"],
+            )
+            self.sleep_range(self.settings.between_actions_delay_seconds)
+        return collected_count

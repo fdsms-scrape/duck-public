@@ -2,13 +2,70 @@ from __future__ import annotations
 
 import unittest
 
+from duckbot.config import AppSettings, ProfileSettings
 from duckbot.game.egg_service import (
+    EggService,
     find_custom_task_submission,
     find_inventory_tournament_egg_to_open,
     find_merge_pair,
     find_pending_cooldown_eggs,
     find_ready_cooldown_egg,
 )
+
+
+class _DummyLogger:
+    def info(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        return None
+
+    def warning(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        return None
+
+    def error(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        return None
+
+
+class _RecordingEggService(EggService):
+    def __init__(self) -> None:
+        super().__init__(
+            profile=ProfileSettings(name="main", init_data="query_id=1&auth_date=1"),
+            settings=AppSettings(),
+            state_store=None,
+            api_client=None,
+            logger=_DummyLogger(),
+            sleep_func=lambda *_args, **_kwargs: None,
+        )
+        self.open_calls: list[tuple[int, int, int]] = []
+        self.merge_calls: list[tuple[int, int]] = []
+        self.api_calls: list[tuple[str, dict[str, object]]] = []
+        self.fetched_eggs: list[dict[str, object]] = []
+        self.refetched_task_payloads = 0
+        self.alert_response: list[dict[str, object]] = []
+
+    def fetch_eggs(self) -> list[dict[str, object]]:
+        eggs = self.fetched_eggs
+        self.fetched_eggs = []
+        return eggs
+
+    def _fetch_task_categories(self, include_clan: bool) -> dict[str, dict[str, object]]:
+        self.refetched_task_payloads += 1
+        return {"PLAYER": {"response": {"tasks": []}}}
+
+    def safe_post(self, path: str, payload: dict[str, object] | None = None) -> dict[str, object] | None:
+        normalized_payload = payload or {}
+        self.api_calls.append((path, normalized_payload))
+        if path == "/alert":
+            return {"response": self.alert_response}
+        if path == "/alert/action":
+            return {"result": True}
+        return {"result": True}
+
+    def _open_egg(self, slot: int, egg_id: int, queue: int) -> bool:
+        self.open_calls.append((slot, egg_id, queue))
+        return True
+
+    def _merge_eggs(self, slot1: int, slot2: int) -> bool:
+        self.merge_calls.append((slot1, slot2))
+        return True
 
 
 class EggServiceHelpersTests(unittest.TestCase):
@@ -31,7 +88,7 @@ class EggServiceHelpersTests(unittest.TestCase):
 
         self.assertEqual(pair, (12, 16))
 
-    def test_find_merge_pair_does_not_merge_unknown_type_without_limit(self) -> None:
+    def test_find_merge_pair_merges_identical_unknown_type_by_default_limit(self) -> None:
         eggs = [
             {"slot": 1, "type": "BOX_CLAN_CARD", "level": 1},
             {"slot": 2, "type": "BOX_CLAN_CARD", "level": 1},
@@ -39,7 +96,7 @@ class EggServiceHelpersTests(unittest.TestCase):
 
         pair = find_merge_pair(eggs, {"DUCK": 12})
 
-        self.assertIsNone(pair)
+        self.assertEqual(pair, (1, 2))
 
     def test_find_ready_cooldown_egg_uses_tsopen_not_type_name(self) -> None:
         egg = {
@@ -156,3 +213,63 @@ class EggServiceHelpersTests(unittest.TestCase):
         egg = find_inventory_tournament_egg_to_open(eggs, max_merge_slot=25)
 
         self.assertEqual(egg, {"slot": 111, "id": 2, "type": "REGULAR_TOURNAMENT_EGG", "level": 2})
+
+    def test_process_opens_standard_egg_when_real_active_slots_are_full(self) -> None:
+        service = _RecordingEggService()
+        service.process(
+            initial_eggs=[
+                {"slot": 6, "id": 101, "type": "DUCK", "level": 3, "queue": 1},
+                {"slot": 7, "id": 102, "type": "HEART", "level": 1, "queue": 1},
+                {"slot": 26, "id": 201, "type": "DUCK", "level": 1, "queue": 1},
+            ],
+            active_slots=[6, 7],
+        )
+
+        self.assertEqual(service.merge_calls, [])
+        self.assertEqual(service.open_calls, [(7, 102, 1)])
+
+    def test_process_refetches_tasks_after_merge_to_recheck_tournament_submission(self) -> None:
+        service = _RecordingEggService()
+        service.process(
+            initial_eggs=[
+                {"slot": 6, "id": 101, "type": "BOX_CLAN_CARD", "level": 1, "queue": 1},
+                {"slot": 7, "id": 102, "type": "BOX_CLAN_CARD", "level": 1, "queue": 1},
+            ],
+            task_payloads={"PLAYER": {"response": {"tasks": []}}},
+            active_slots=[6, 7],
+        )
+
+        self.assertEqual(service.merge_calls, [(6, 7)])
+        self.assertEqual(service.refetched_task_payloads, 1)
+
+    def test_process_collects_alert_after_opening_non_heart_egg(self) -> None:
+        service = _RecordingEggService()
+        service.alert_response = [
+            {
+                "id": 175286573,
+                "type": "REWARD",
+                "typeHuman": "Награда",
+                "buttons": [
+                    {
+                        "url": "/alert/action",
+                        "params": {"id": 175286573, "action": "confirm"},
+                    }
+                ],
+            }
+        ]
+
+        service.process(
+            initial_eggs=[
+                {"slot": 6, "id": 101, "type": "DUCK", "level": 12, "queue": 1},
+            ],
+            active_slots=[6],
+        )
+
+        self.assertEqual(service.open_calls, [(6, 101, 1)])
+        self.assertEqual(
+            service.api_calls,
+            [
+                ("/alert", {}),
+                ("/alert/action", {"id": 175286573, "action": "confirm"}),
+            ],
+        )

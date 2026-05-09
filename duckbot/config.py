@@ -10,7 +10,12 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from duckbot.constants import DEFAULT_API_BASE_URL, DEFAULT_FEED_LIMITS, DEFAULT_HTTP_HEADERS
+from duckbot.constants import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_EGG_MERGE_LIMITS,
+    DEFAULT_FEED_LIMITS,
+    DEFAULT_HTTP_HEADERS,
+)
 from duckbot.exceptions import ConfigurationError
 
 
@@ -67,11 +72,14 @@ class FeatureSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     process_eggs: bool = False
+    participate_egg_tournaments: bool = True
     collect_alert_rewards: bool = True
     collect_task_rewards: bool = True
     collect_custom_task_rewards: bool = False
+    collect_reward_pass_rewards: bool = True
     inspect_tournaments: bool = True
     inspect_clan_show: bool = True
+    use_clan_show_sabotages: bool = False
 
 
 class BreedRuleSettings(BaseModel):
@@ -244,11 +252,59 @@ class GameSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_merge_slot: int = 25
+    egg_merge_limits: dict[str, int] = Field(default_factory=lambda: dict(DEFAULT_EGG_MERGE_LIMITS))
     clan_show_log_best_targets_limit: int = 3
     clan_show_log_recent_attacks_limit: int = 3
+    clan_show_attack_limit_per_cycle: int = 1
+    clan_show_attack_min_success_chance: float = 0.75
+    clan_show_attack_max_revenge_chance: float = 0.60
+    clan_show_attack_require_same_group: bool = True
+    clan_show_attack_refresh_targets_each_use: bool = True
     feed_limits: dict[str, int] = Field(default_factory=lambda: dict(DEFAULT_FEED_LIMITS))
     feed_rules: list[FeedRuleSettings] = Field(default_factory=list)
     breed_rules: list[BreedRuleSettings] = Field(default_factory=lambda: [BreedRuleSettings(quality="COMMON")])
+
+    @field_validator("egg_merge_limits", mode="before")
+    @classmethod
+    def normalize_egg_merge_limits(cls, value: object) -> object:
+        if value is None:
+            return dict(DEFAULT_EGG_MERGE_LIMITS)
+        return value
+
+    @field_validator("egg_merge_limits")
+    @classmethod
+    def validate_egg_merge_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        normalized: dict[str, int] = {}
+        for egg_type, max_level in value.items():
+            normalized_type = str(egg_type).strip().upper()
+            if not normalized_type:
+                raise ValueError("Тип яйца в egg_merge_limits не может быть пустым.")
+            normalized[normalized_type] = _normalize_level(
+                max_level,
+                field_name=f"Максимальный уровень merge для яйца {normalized_type}",
+            )
+        return normalized
+
+    @field_validator(
+        "clan_show_log_best_targets_limit",
+        "clan_show_log_recent_attacks_limit",
+        "clan_show_attack_limit_per_cycle",
+    )
+    @classmethod
+    def validate_positive_integer_settings(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Значение должно быть не меньше 1.")
+        return value
+
+    @field_validator(
+        "clan_show_attack_min_success_chance",
+        "clan_show_attack_max_revenge_chance",
+    )
+    @classmethod
+    def validate_probability_settings(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("Вероятность должна быть в диапазоне от 0 до 1.")
+        return value
 
     @field_validator("feed_rules", mode="before")
     @classmethod
@@ -283,6 +339,7 @@ class AppSettings(BaseModel):
     between_profiles_delay_seconds: list[float] = Field(default_factory=lambda: [5.0, 10.0])
     between_actions_delay_seconds: list[float] = Field(default_factory=lambda: [0.5, 1.0])
     after_feed_delay_seconds: list[float] = Field(default_factory=lambda: [1.0, 2.0])
+    after_egg_merge_delay_seconds: list[float] = Field(default_factory=lambda: [1.0, 2.0])
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     retry: RetrySettings = Field(default_factory=RetrySettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -299,6 +356,7 @@ class AppSettings(BaseModel):
         "between_profiles_delay_seconds",
         "between_actions_delay_seconds",
         "after_feed_delay_seconds",
+        "after_egg_merge_delay_seconds",
     )
     @classmethod
     def validate_delay_range(cls, value: list[float]) -> list[float]:

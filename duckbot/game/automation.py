@@ -11,6 +11,7 @@ from duckbot.game.clan_show_service import ClanShowService
 from duckbot.game.duck_service import DuckService, select_active_ducks
 from duckbot.game.egg_service import EggService
 from duckbot.game.player_service import PlayerService
+from duckbot.game.reward_pass_service import RewardPassService
 from duckbot.game.task_service import TaskService
 from duckbot.game.tournament_service import TournamentService
 from duckbot.http.api_client import DuckApiClient
@@ -44,6 +45,7 @@ class DuckAutomation:
         self.alerts_service = AlertsService(**common_kwargs)
         self.task_service = TaskService(**common_kwargs)
         self.egg_service = EggService(**common_kwargs)
+        self.reward_pass_service = RewardPassService(**common_kwargs)
         self.tournament_service = TournamentService(**common_kwargs)
         self.clan_show_service = ClanShowService(**common_kwargs)
         self.logger = logger
@@ -119,9 +121,16 @@ class DuckAutomation:
                 active_slots=player_context.egg_slots,
             )
 
+        if self.settings.features.collect_reward_pass_rewards:
+            self.reward_pass_service.collect_available_rewards()
+
         tournament_context = None
-        if self.settings.features.inspect_tournaments or self.settings.features.inspect_clan_show:
+        if (
+            self.settings.features.inspect_tournaments
+            or self.settings.features.inspect_clan_show
+            or self.settings.features.use_clan_show_sabotages
+        ):
             tournament_context = self.tournament_service.inspect()
 
-        if self.settings.features.inspect_clan_show:
+        if self.settings.features.inspect_clan_show or self.settings.features.use_clan_show_sabotages:
             self.clan_show_service.inspect(player_context, tournament_context)
