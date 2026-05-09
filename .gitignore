@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+config.yaml
+profiles.local.yaml
+runtime/
+logs/
+url.txt

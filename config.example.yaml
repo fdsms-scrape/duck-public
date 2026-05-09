@@ -1,0 +1,58 @@
+api_base_url: "https://api.duckmyduck.com"
+request_timeout_seconds: 15
+cycle_sleep_seconds: 1800
+between_profiles_delay_seconds: [5, 10]
+between_actions_delay_seconds: [0.5, 1.0]
+after_feed_delay_seconds: [1.0, 2.0]
+
+logging:
+  level: "INFO"
+  file_path: "logs/duckbot.log"
+  max_bytes: 1048576
+  backup_count: 3
+  console: true
+
+retry:
+  max_attempts: 3
+  base_delay_seconds: 2
+  rate_limit_multiplier: 5
+
+auth:
+  refresh_margin_seconds: 300
+  state_path: "runtime/state.json"
+
+features:
+  process_eggs: false
+  collect_alert_rewards: true
+  collect_task_rewards: true
+  collect_custom_task_rewards: false
+  inspect_tournaments: true
+  inspect_clan_show: true
+
+game:
+  max_merge_slot: 25
+  clan_show_log_best_targets_limit: 3
+  clan_show_log_recent_attacks_limit: 3
+  feed_rules:
+    COMMON: [30, 30, 30, 30, 30]
+    UNCOMMON: [80, 80, 80, 80, 80]
+    RARE: [120, 120, 120, 120, 120]
+    EPIC: [200, 200, 200, 200, 200]
+    LEGENDARY: [1000, 1000, 1000, 1000, 1000]
+  breed_rules:
+    COMMON:
+      currency: "corn"
+      levels: [1, 2, 3, 4]
+
+http_headers:
+  accept: "application/json"
+  accept-language: "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+  content-type: "application/json"
+  origin: "https://webapp.duckmyduck.com"
+  referer: "https://webapp.duckmyduck.com/"
+  sec-fetch-dest: "empty"
+  sec-fetch-mode: "cors"
+  sec-fetch-site: "same-site"
+  sec-fetch-storage-access: "active"
+  x-app-version: "1.57.231"
+  x-platform: "WEB"

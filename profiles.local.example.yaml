@@ -1,0 +1,9 @@
+profiles:
+  - name: "main"
+    enabled: true
+    api_base_url: "https://api.duckmyduck.com"
+    webapp_url: "https://selector.duckmyduck.com/#tgWebAppData=..."
+
+  - name: "alt"
+    enabled: false
+    init_data: "query_id=...&user=%7B...%7D&auth_date=...&signature=...&hash=..."
