@@ -1,19 +1,20 @@
 # DuckBot
 
-DuckBot — это CLI-проект для автоматизации DuckMyDuck с многопрофильной авторизацией, конфигом, логированием и разнесенной бизнес-логикой.
+DuckBot — CLI-проект для автоматизации DuckMyDuck с многопрофильной авторизацией, конфигом, логированием и разнесенной бизнес-логикой.
 
-Проект работает только через реальный `webapp_url` или `init_data` из Telegram WebApp. Сам бот не генерирует ссылку и не получает `init_data` через Telegram-клиент.
+Проект работает только через реальный `webapp_url` или `init_data` из Telegram WebApp. Бот не генерирует ссылку сам и не получает `init_data` через Telegram-клиент.
 
 ## Что умеет проект
 
 - Работает с несколькими профилями последовательно и изолированно.
 - Сам меняет `Telegram init_data` на игровой JWT через `POST /auth/telegram`.
 - Всегда ходит в API как Android WebView с фиксированным mobile fingerprint.
-- Кормит и разводит уток.
-- Обрабатывает яйца.
+- Кормит уток по настраиваемым правилам редкости, уровня и стоимости шага.
+- Отправляет уток на скрещивание по настраиваемым правилам редкости и уровня.
+- Обрабатывает яйца, если это включено в конфиге.
 - Собирает подтверждаемые награды из алертов.
-- Собирает обычные награды задач через `tasks/reward`.
-- Умеет работать с кастомными турнирными задачами через `tasks/reward/custom`.
+- Собирает обычные награды задач через `/tasks/reward`.
+- Умеет работать с кастомными турнирными задачами через `/tasks/reward/custom`.
 - Анализирует активные турниры и механику Clan Show.
 - Пишет логи в консоль и файл, маскируя секреты.
 
@@ -21,6 +22,7 @@ DuckBot — это CLI-проект для автоматизации DuckMyDuck
 
 ```text
 duckbot/
+  __init__.py
   __main__.py
   config.py
   constants.py
@@ -52,20 +54,22 @@ duckbot/
     logging_setup.py
 config.example.yaml
 profiles.local.example.yaml
+run.cmd
+run.ps1
 requirements.txt
 README.md
 ```
 
 Зоны ответственности внутри `duckbot/game`:
 
-- `player_service.py` — снимок игрока и алерты.
-- `duck_service.py` — выбор активных уток, кормление, разведение.
+- `player_service.py` — снимок игрока и первичные данные профиля.
+- `duck_service.py` — выбор активных уток, кормление и скрещивание.
 - `egg_service.py` — merge/open логика яиц.
 - `alerts_service.py` — подтверждение наград из алертов.
 - `task_service.py` — обычные и кастомные награды задач.
 - `tournament_service.py` — анализ турниров.
 - `clan_show_service.py` — аналитика Clan Show.
-- `automation.py` — только orchestration цикла.
+- `automation.py` — orchestration цикла без бизнес-логики по конкретным механикам.
 
 ## Быстрый старт
 
@@ -103,6 +107,23 @@ python -m duckbot auth-check --profile main
 python -m duckbot once --profile main
 ```
 
+7. Для бесконечного запуска по всем включенным профилям используйте любой из вариантов:
+
+```powershell
+python -m duckbot run --all
+```
+
+```powershell
+.\run.ps1
+```
+
+```cmd
+run.cmd
+```
+
+`run.ps1` и `run.cmd` ищут Python в `.venv\Scripts\python.exe`, затем в `venv\Scripts\python.exe`, и только потом используют `python` из `PATH`. Если аргументы не переданы, по умолчанию запускается `run --all`.
+Если вы запускаете `run.cmd` из PowerShell, используйте `.\run.cmd`.
+
 ## Настройка `config.yaml`
 
 `config.yaml` хранит только общие настройки без секретов.
@@ -133,10 +154,55 @@ python -m duckbot once --profile main
 - `max_merge_slot` — размер активного поля яиц.
 - `clan_show_log_best_targets_limit` — сколько лучших целей Clan Show показывать в логах.
 - `clan_show_log_recent_attacks_limit` — сколько недавних атак показывать в логах аналитики.
-- `feed_rules` — компактные лимиты кормления по редкости и уровням. Можно задавать списком на 5 уровней, например `COMMON: [30, 30, 35, 40, 50]`.
-- `breed_rules` — компактные правила скрещивания по редкости и уровням, например `COMMON: { currency: "corn", levels: [1, 2, 3, 4, 5] }`.
+- `feed_rules` — компактные лимиты кормления по редкости и уровням.
+- `breed_rules` — компактные правила скрещивания по редкости и уровням.
 
-Секция `http_headers` хранит безопасные общие заголовки. Mobile fingerprint не переопределяется и всегда остается Android.
+Секция `http_headers` хранит безопасные общие заголовки. Mobile fingerprint не переопределяется и всегда остается Android WebView.
+
+### Компактные правила кормления
+
+`feed_rules` задаются по редкости. Список из пяти элементов соответствует уровням `1..5`.
+
+Пример:
+
+```yaml
+game:
+  feed_rules:
+    COMMON: [30, 30, 35, 40, null]
+    UNCOMMON: [80, 80, 80, 90, 100]
+    RARE: [120, 120, null, null, null]
+```
+
+Что это значит:
+
+- `COMMON` можно кормить до стоимости `30`, `30`, `35`, `40` на уровнях `1..4`.
+- `COMMON` уровня `5` пропускается, потому что для него задан `null`.
+- `RARE` будет кормиться только на уровнях `1` и `2`.
+
+Старый формат `feed_limits` поддерживается только как fallback для совместимости, но для новых конфигов рекомендуется использовать именно `feed_rules`.
+
+### Компактные правила скрещивания
+
+`breed_rules` задаются по редкости. Для каждой редкости указываются разрешенные уровни и валюта.
+
+Пример:
+
+```yaml
+game:
+  breed_rules:
+    COMMON:
+      currency: "corn"
+      levels: [1, 2, 3, 4]
+    UNCOMMON:
+      currency: "corn"
+      levels: [2, 3]
+```
+
+Что это значит:
+
+- `COMMON` будет отправляться на скрещивание только на уровнях `1..4`.
+- Уровень `5` в скрещивание не идет.
+- В `STAKE` бот никого не отправляет автоматически.
 
 ## Настройка `profiles.local.yaml`
 
@@ -154,10 +220,11 @@ python -m duckbot once --profile main
 profiles:
   - name: "main"
     enabled: true
+    api_base_url: "https://api.duckmyduck.com"
     webapp_url: "https://selector.duckmyduck.com/#tgWebAppData=..."
 
-  - name: "farm2"
-    enabled: true
+  - name: "alt"
+    enabled: false
     init_data: "query_id=...&user=%7B...%7D&auth_date=...&signature=...&hash=..."
 ```
 
@@ -166,6 +233,41 @@ profiles:
 - нельзя указывать одновременно `webapp_url` и `init_data`
 - нельзя оставлять оба поля пустыми
 - `init_data` можно хранить как raw-строку или percent-encoded вариант
+- `api_base_url` у профиля можно переопределить отдельно, например для `api-ru`
+
+### Как получить `webapp_url`
+
+Если вы используете профиль через `webapp_url`, нужен полный `src` у iframe, в котором открыт DuckMyDuck. Важно копировать именно всю ссылку целиком, вместе с `tgWebAppData`.
+
+Порядок действий:
+
+1. Откройте страницу с игрой.
+2. Нажмите `F12`, чтобы открыть DevTools.
+3. Перейдите в `Elements` или `Console`.
+4. Найдите iframe игры. В нашем случае это `iframe.payment-verification`.
+5. Скопируйте значение `src` и вставьте его в `profiles.local.yaml` как `webapp_url`.
+
+Быстрый способ через консоль:
+
+```js
+document.querySelector("iframe.payment-verification")?.src
+```
+
+Если класс отличается, можно попробовать более общий вариант:
+
+```js
+document.querySelector("iframe")?.src
+```
+
+Нужно получить ссылку вида:
+
+```text
+https://webapp.duckmyduck.com/home?tgWebAppData=...
+```
+
+Именно ее затем использует бот, чтобы извлечь `tgWebAppData` и обменять его на JWT через `/auth/telegram`.
+
+![Как найти webapp_url в iframe](example.png)
 
 ## Команды
 
@@ -187,10 +289,32 @@ python -m duckbot once --profile main
 python -m duckbot once --all
 ```
 
-Бесконечный рабочий цикл:
+Бесконечный рабочий цикл по одному профилю:
+
+```powershell
+python -m duckbot run --profile main
+```
+
+Бесконечный рабочий цикл по всем включенным профилям:
 
 ```powershell
 python -m duckbot run --all
+```
+
+Альтернатива для Windows:
+
+```powershell
+.\run.ps1
+```
+
+```cmd
+.\run.cmd
+```
+
+Если нужно использовать нестандартные пути:
+
+```powershell
+python -m duckbot --config custom-config.yaml --profiles-file custom-profiles.yaml once --all
 ```
 
 ## Как устроена авторизация
@@ -209,7 +333,7 @@ python -m duckbot run --all
 По `endpoints.txt` и ответам API вынесены отдельные сценарии:
 
 - `/alert/action` — подтверждение наград из алертов.
-- `/tasks` + `/tasks/reward` — сбор обычных наград задач.
+- `/tasks` и `/tasks/reward` — сбор обычных наград задач.
 - `/tasks/reward/custom` — обработка кастомных турнирных задач.
 - `/tournaments` — анализ активных турниров.
 - `/clans/show/sabotages` — чтение доступных саботажей.
@@ -220,7 +344,7 @@ python -m duckbot run --all
 
 - `collect_custom_task_rewards` по умолчанию выключен, потому что такие задачи расходуют яйца.
 - Для кастомных наград бот сам подбирает `slotIds` по критериям задачи и сначала предпочитает инвентарные слоты вне активного merge-поля.
-- Использование `/clans/show/sabotage/use` автоматически не включено: там нужен осознанный выбор цели и это уже боевая мутация, а не безопасный сбор наград.
+- Использование `/clans/show/sabotage/use` автоматически не включено: там нужен осознанный выбор цели, и это уже боевая мутация, а не безопасный сбор наград.
 
 ## Что исправлено
 
@@ -233,18 +357,19 @@ python -m duckbot run --all
 
 - Логи по умолчанию пишутся в `logs/duckbot.log`.
 - JWT и служебное состояние профилей хранятся в `runtime/state.json`.
-- В логах маскируются:
-  - `authorization`
-  - JWT
-  - `init_data`
-  - полный `webapp_url`
-  - чувствительные query-параметры Telegram
+- В логах маскируются `authorization`, JWT, `init_data`, полный `webapp_url` и чувствительные query-параметры Telegram.
+
+Пример записи о кормлении:
+
+```text
+Покормили утку 27322585 редкости UNCOMMON (2/190), стоимость шага=2 corn, остаток=123456 corn
+```
 
 ## Mobile fingerprint
 
 Все запросы всегда отправляются как Android WebView.
 
-Неизменяемые заголовки:
+Ключевые заголовки:
 
 - `sec-ch-ua-platform: "Android"`
 - `sec-ch-ua-mobile: ?1`
@@ -264,6 +389,12 @@ python -m duckbot run --all
 python -m duckbot run --all
 ```
 
+Или корневой launcher:
+
+```cmd
+.\run.cmd
+```
+
 Рабочая директория должна указывать на корень проекта, где лежат `config.yaml` и `profiles.local.yaml`.
 
 ## Проверка проекта
@@ -274,7 +405,7 @@ python -m duckbot run --all
 python -m unittest discover -s tests -v
 ```
 
-Быстрый smoke flow:
+Рекомендуемый smoke flow:
 
 1. `python -m duckbot auth-check --profile main`
 2. `python -m duckbot once --profile main`
