@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any
 
 from duckbot.config import BreedRuleSettings, FeedRuleSettings
+from duckbot.exceptions import ApiError, ApiResponseError
 from duckbot.game.base import GameService
 from duckbot.game.models import PlayerContext
 
@@ -18,11 +19,21 @@ def count_duck_states(ducks: list[dict[str, Any]]) -> dict[str, int]:
     return dict(Counter(str(duck.get("state") or "UNKNOWN") for duck in ducks))
 
 
-def select_active_ducks(ducks: list[dict[str, Any]], duck_slots_count: int) -> list[dict[str, Any]]:
-    """Берет первые доступные игровые слоты после исключения стейкинга и прочих неактивных состояний."""
-    if duck_slots_count <= 0:
-        return []
-    return [duck for duck in ducks if duck.get("state") in ACTIONABLE_DUCK_STATES][:duck_slots_count]
+def select_active_ducks(
+    ducks: list[dict[str, Any]],
+    duck_slots_count: int | None = None,
+) -> list[dict[str, Any]]:
+    """Возвращает активное окно уток для текущего экрана по порядку ответа сервера.
+
+    Сервер может возвращать длинную очередь уток со статусом FEED, но реально доступными
+    для действий оказываются только первые `duckSlotsCount` уток из активного окна.
+    Утки в STAKE в это окно не попадают, поэтому сначала фильтруем по состояниям, а уже
+    потом ограничиваем список длиной видимого окна.
+    """
+    actionable_ducks = [duck for duck in ducks if duck.get("state") in ACTIONABLE_DUCK_STATES]
+    if duck_slots_count is None or duck_slots_count <= 0:
+        return actionable_ducks
+    return actionable_ducks[:duck_slots_count]
 
 
 def resolve_breed_rule(duck: dict[str, Any], breed_rules: list[BreedRuleSettings]) -> BreedRuleSettings | None:
@@ -81,21 +92,35 @@ class DuckService(GameService):
             )
         return ducks
 
-    def process_active_ducks(self, ducks: list[dict[str, Any]], player_context: PlayerContext) -> None:
+    def process_active_ducks(
+        self,
+        ducks: list[dict[str, Any]],
+        player_context: PlayerContext,
+        *,
+        total_actionable_count: int | None = None,
+    ) -> None:
         if not ducks:
             self.logger.info("Активные утки для обработки не найдены.")
             return
 
         self.logger.info(
-            "В работу взято %s активных уток из %s доступных слотов.",
+            "В работу взято %s уток из активного окна. Серверный duckSlotsCount=%s, всего actionable-уток в ответе=%s.",
             len(ducks),
             player_context.duck_slots_count,
+            total_actionable_count if total_actionable_count is not None else len(ducks),
         )
-        for duck in ducks:
-            self._process_duck(duck, player_context)
+        for index, duck in enumerate(ducks):
+            should_continue = self._process_duck(duck, player_context)
+            if not should_continue:
+                remaining = len(ducks) - index - 1
+                self.logger.info(
+                    "Сервер закрыл оставшиеся слоты кормления. Прерываем обработку хвоста списка, пропускаем %s уток до следующего цикла.",
+                    remaining,
+                )
+                break
             self.sleep_range(self.settings.between_actions_delay_seconds)
 
-    def _process_duck(self, duck: dict[str, Any], player_context: PlayerContext) -> None:
+    def _process_duck(self, duck: dict[str, Any], player_context: PlayerContext) -> bool:
         duck_id = duck.get("id")
         state = duck.get("state")
         rarity = duck.get("quality", "COMMON")
@@ -107,7 +132,7 @@ class DuckService(GameService):
                 response = self.safe_post("/ducks/breed/eggs/collect", {"id": breeding_id})
                 if response:
                     self.logger.info("Собрали яйца для утки %s", duck_id)
-            return
+            return True
 
         if state == "FEED":
             feed_costs = duck.get("feedCost", [])
@@ -120,7 +145,7 @@ class DuckService(GameService):
                     rarity,
                     level,
                 )
-                return
+                return True
 
             limit = feed_rule.max_cost
 
@@ -129,12 +154,16 @@ class DuckService(GameService):
                 if cost > limit or player_context.corn < cost:
                     break
 
-                response = self.safe_post(
-                    "/ducks/feed",
-                    {"id": duck_id, "timestamps": [int(time.time())]},
-                )
+                response, stop_reason = self._feed_duck_once(duck_id)
+                if stop_reason:
+                    self.logger.info(
+                        "Остановили кормление утки %s: сервер сменил состояние или слот стал недоступен (%s).",
+                        duck_id,
+                        stop_reason,
+                    )
+                    return stop_reason != "error_slot_not_available"
                 if not response:
-                    break
+                    return True
 
                 player_context.corn -= cost
                 feed_count += 1
@@ -148,7 +177,7 @@ class DuckService(GameService):
                     player_context.corn,
                 )
                 self.sleep_range(self.settings.after_feed_delay_seconds)
-            return
+            return True
 
         if state == "BREED":
             breed_rule = resolve_breed_rule(duck, self.settings.game.breed_rules)
@@ -159,7 +188,7 @@ class DuckService(GameService):
                     rarity,
                     level,
                 )
-                return
+                return True
 
             pay_response = self.safe_post(
                 "/ducks/breed/pay",
@@ -175,3 +204,22 @@ class DuckService(GameService):
                     breed_rule.currency,
                 )
                 self.safe_post("/ducks/breed/search", {"id": duck_id})
+            return True
+
+        return True
+
+    def _feed_duck_once(self, duck_id: int | None) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            response = self.api_client.post(
+                "/ducks/feed",
+                {"id": duck_id, "timestamps": [int(time.time())]},
+            )
+            return response, None
+        except ApiResponseError as exc:
+            if exc.error_code in {"error_duck_bad_state", "error_slot_not_available"}:
+                return None, exc.error_code
+            self.logger.error("Вызов /ducks/feed завершился ошибкой: %s", exc)
+            return None, None
+        except ApiError as exc:
+            self.logger.error("Вызов /ducks/feed завершился ошибкой: %s", exc)
+            return None, None

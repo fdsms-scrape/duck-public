@@ -108,6 +108,11 @@ class DuckApiClient:
                 delay *= 2
                 continue
 
+            if response.status_code >= 500:
+                non_retryable_error = self._extract_non_retryable_server_error(response)
+                if non_retryable_error is not None:
+                    raise non_retryable_error
+
             if response.status_code >= 500 and attempt < self.retry_settings.max_attempts:
                 self.logger.warning(
                     "Серверная ошибка %s для %s. Повтор через %.1fс.",
@@ -124,6 +129,7 @@ class DuckApiClient:
                 message = data.get("error") or data.get("message") or response.text
                 raise ApiResponseError(
                     f"Запрос к API {path} завершился ошибкой: {sanitize_value(str(message))}",
+                    error_code=str(data.get("error")) if data.get("error") else None,
                     status_code=response.status_code,
                     response_body=sanitize_value(response.text),
                 )
@@ -144,12 +150,38 @@ class DuckApiClient:
 
         if not isinstance(payload, dict):
             raise ApiResponseError(
-                f"API {path} вернул неожидаемую структуру JSON.",
+                f"API {path} вернул неожиданную структуру JSON.",
                 status_code=response.status_code,
                 response_body=sanitize_value(json.dumps(payload, ensure_ascii=False)),
             )
 
         return payload
+
+    def _extract_non_retryable_server_error(self, response: requests.Response) -> ApiResponseError | None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        error_code = payload.get("error")
+        if not isinstance(error_code, str) or not error_code:
+            return None
+
+        if error_code == "UNKNOWN":
+            return None
+
+        if not error_code.startswith("error_"):
+            return None
+
+        return ApiResponseError(
+            f"Запрос к API завершился ошибкой: {sanitize_value(error_code)}",
+            error_code=error_code,
+            status_code=response.status_code,
+            response_body=sanitize_value(response.text),
+        )
 
     def _resolve_rate_limit_delay(self, response: requests.Response, default_delay: float) -> float:
         retry_after = response.headers.get("Retry-After")

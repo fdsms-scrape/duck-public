@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import unittest
 
+from duckbot.config import RetrySettings
+from duckbot.exceptions import ApiResponseError
 from duckbot.http.api_client import DuckApiClient
 from duckbot.http.auth_manager import AuthSession
-from duckbot.config import RetrySettings
 from duckbot.http.header_builder import HeaderBuilder
 
 
@@ -113,3 +114,38 @@ class ApiClientTests(unittest.TestCase):
 
         self.assertTrue(result["response"]["ok"])
         self.assertEqual(sleep_calls, [10])
+
+    def test_client_does_not_retry_non_retryable_business_error_under_500(self) -> None:
+        auth_manager = StubAuthManager()
+        session = FakeSession(
+            [
+                FakeResponse(500, {"result": False, "error": "error_duck_bad_state"}),
+                FakeResponse(200, {"result": True, "response": {"ok": True}}),
+            ]
+        )
+        sleep_calls: list[float] = []
+        logger = type(
+            "Logger",
+            (),
+            {
+                "debug": lambda *a, **k: None,
+                "warning": lambda *a, **k: None,
+            },
+        )()
+        client = DuckApiClient(
+            session=session,
+            api_base_url="https://api.duckmyduck.com",
+            header_builder=HeaderBuilder(),
+            auth_manager=auth_manager,
+            retry_settings=RetrySettings(max_attempts=3, base_delay_seconds=2, rate_limit_multiplier=5),
+            timeout_seconds=15,
+            logger=logger,
+            sleep_func=sleep_calls.append,
+        )
+
+        with self.assertRaises(ApiResponseError) as raised:
+            client.post("/ducks/feed", {"id": 1})
+
+        self.assertEqual(raised.exception.error_code, "error_duck_bad_state")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(sleep_calls, [])

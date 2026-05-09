@@ -26,9 +26,11 @@ class ApiResponseError(ApiError):
         self,
         message: str,
         *,
+        error_code: str | None = None,
         status_code: int | None = None,
         response_body: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.error_code = error_code
         self.status_code = status_code
         self.response_body = response_body
