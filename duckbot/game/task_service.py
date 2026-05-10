@@ -12,6 +12,7 @@ TASK_CATEGORY_CLAN = "CLAN"
 READY_TASK_STATE = 2
 CUSTOM_READY_TASK_STATE = 3
 STANDARD_REWARD_STATES = {READY_TASK_STATE, CUSTOM_READY_TASK_STATE}
+MAX_AUTO_TOURNAMENT_EGG_LEVEL = 9
 
 
 def _to_int(value: Any) -> int | None:
@@ -99,10 +100,21 @@ def pick_custom_task_slot_ids(
         if not isinstance(criterion, dict):
             continue
         egg_type = criterion.get("eggType")
-        levels = set(criterion.get("eggLevel") or [])
+        levels = {
+            int(level)
+            for level in (criterion.get("eggLevel") or [])
+            if _to_int(level) is not None and int(level) <= MAX_AUTO_TOURNAMENT_EGG_LEVEL
+        }
+        requested_levels = {
+            int(level)
+            for level in (criterion.get("eggLevel") or [])
+            if _to_int(level) is not None
+        }
         count = int(criterion.get("value") or 0)
         if not egg_type or count <= 0:
             continue
+        if requested_levels and not levels:
+            return None
 
         matches = [
             egg

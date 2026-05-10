@@ -23,9 +23,18 @@ def _egg_slot(egg: dict[str, Any]) -> int:
     return int(egg.get("slot", 0))
 
 
+def _normalize_slot_pair(slot1: int, slot2: int) -> tuple[int, int]:
+    return tuple(sorted((int(slot1), int(slot2))))
+
+
 def is_cooldown_egg(egg: dict[str, Any]) -> bool:
     """Определяет яйца, которые открываются только после таймера."""
     return egg.get("tsOpen") is not None
+
+
+def is_repeatable_tournament_egg(egg: dict[str, Any]) -> bool:
+    """Определяет повторяемые яйца, которые можно перевести в режим отката."""
+    return "REPEATABLE" in _egg_type(egg)
 
 
 def is_cooldown_egg_ready(egg: dict[str, Any], current_ts: int) -> bool:
@@ -58,12 +67,24 @@ def find_pending_cooldown_eggs(eggs: list[dict[str, Any]], current_ts: int) -> l
     return sorted(pending_eggs, key=lambda egg: (int(egg.get("tsOpen") or 0), _egg_slot(egg)))
 
 
+def find_activatable_cooldown_egg(eggs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Ищет повторяемое яйцо без таймера, которое нужно поставить на откат."""
+    activatable_eggs = [
+        egg
+        for egg in eggs
+        if is_repeatable_tournament_egg(egg) and egg.get("tsOpen") is None
+    ]
+    if not activatable_eggs:
+        return None
+    return min(activatable_eggs, key=lambda egg: (_egg_slot(egg), _egg_level(egg), _egg_type(egg)))
+
+
 def is_egg_merge_allowed(egg: dict[str, Any], egg_merge_limits: dict[str, int]) -> bool:
     """Проверяет, можно ли объединять яйцо дальше по его типу и уровню."""
     egg_type = _egg_type(egg)
     max_level = egg_merge_limits.get(egg_type)
     if max_level is None:
-        if "TOURNAMENT_EGG" in egg_type or "REPEATABLE_EGG" in egg_type:
+        if "TOURNAMENT" in egg_type or "REPEATABLE" in egg_type:
             max_level = 5
         else:
             max_level = DEFAULT_EGG_MERGE_LIMITS["DUCK"]
@@ -73,8 +94,10 @@ def is_egg_merge_allowed(egg: dict[str, Any], egg_merge_limits: dict[str, int]) 
 def find_merge_pair(
     eggs: list[dict[str, Any]],
     egg_merge_limits: dict[str, int],
+    excluded_slots: set[int] | None = None,
 ) -> tuple[int, int] | None:
     """Ищет первую допустимую пару одинаковых яиц для объединения."""
+    excluded_slots = excluded_slots or set()
     seen: dict[tuple[str, int], int] = {}
     for egg in sorted(
         eggs,
@@ -82,8 +105,10 @@ def find_merge_pair(
     ):
         key = (_egg_type(egg), _egg_level(egg))
         slot = _egg_slot(egg)
+        if slot in excluded_slots:
+            continue
         if key in seen and is_egg_merge_allowed(egg, egg_merge_limits):
-            return seen[key], slot
+            return _normalize_slot_pair(seen[key], slot)
         seen[key] = slot
     return None
 
@@ -167,7 +192,10 @@ class EggService(GameService):
             active_slot_set = set(range(1, self.settings.game.max_merge_slot + 1))
 
         if reserved_slots:
-            self.logger.info("Зарезервированы слоты яиц, которые нельзя трогать в этом цикле: %s", sorted(reserved_slots))
+            self.logger.info(
+                "Зарезервированы слоты яиц, которые нельзя трогать в этом цикле: %s",
+                sorted(reserved_slots),
+            )
 
         while True:
             eggs = current_eggs if current_eggs is not None else self.fetch_eggs()
@@ -202,6 +230,12 @@ class EggService(GameService):
                 for egg in eggs
                 if egg.get("id")
                 and _egg_slot(egg) in active_slot_set
+                and _egg_slot(egg) not in reserved_slots
+            ]
+            all_available_eggs = [
+                egg
+                for egg in eggs
+                if egg.get("id")
                 and _egg_slot(egg) not in reserved_slots
             ]
             occupied_active_slots = {
@@ -250,7 +284,7 @@ class EggService(GameService):
                     )
 
             ready_cooldown_egg = (
-                find_ready_cooldown_egg(valid_eggs, current_ts)
+                find_ready_cooldown_egg(all_available_eggs, current_ts)
                 if self.settings.features.participate_egg_tournaments
                 else None
             )
@@ -270,18 +304,63 @@ class EggService(GameService):
                     self.sleep_range(self.settings.after_feed_delay_seconds)
                     continue
 
-            merge_pair = find_merge_pair(valid_eggs, self.settings.game.egg_merge_limits)
-            if merge_pair and self._merge_eggs(*merge_pair):
+            activatable_cooldown_egg = (
+                find_activatable_cooldown_egg(all_available_eggs)
+                if self.settings.features.participate_egg_tournaments
+                else None
+            )
+            if activatable_cooldown_egg:
+                if self._open_egg(
+                    _egg_slot(activatable_cooldown_egg),
+                    int(activatable_cooldown_egg["id"]),
+                    int(activatable_cooldown_egg.get("queue") or 1),
+                ):
+                    self.logger.info(
+                        "Поставили яйцо %s в слоте %s на откат",
+                        _egg_type(activatable_cooldown_egg),
+                        _egg_slot(activatable_cooldown_egg),
+                    )
+                    open_count += 1
+                    self.sleep_range(self.settings.after_feed_delay_seconds)
+                    continue
+
+            rejected_pairs: set[tuple[int, int]] = set()
+            rejected_slots: set[int] = set()
+            merge_succeeded = False
+            while True:
+                merge_pair = find_merge_pair(
+                    valid_eggs,
+                    self.settings.game.egg_merge_limits,
+                    excluded_slots=rejected_slots,
+                )
+                if merge_pair is None:
+                    break
+
                 base_egg = eggs_by_slot[merge_pair[0]]
-                self.logger.info(
-                    "Объединили яйцо %s уровня %s",
+                if self._merge_eggs(*merge_pair):
+                    self.logger.info(
+                        "Объединили яйцо %s уровня %s",
+                        base_egg["type"],
+                        base_egg["level"],
+                    )
+                    merge_count += 1
+                    merge_succeeded = True
+                    if current_task_payloads and not custom_reward_stop:
+                        current_task_payloads = self._fetch_task_categories(include_clan_tasks)
+                    self.sleep_range(self.settings.after_egg_merge_delay_seconds)
+                    break
+
+                rejected_pairs.add(merge_pair)
+                rejected_slots.update(merge_pair)
+                self.logger.warning(
+                    "Пропускаем пару яиц %s уровня %s в слотах %s и %s: сервер отклонил merge, попробуем другую пару в этом цикле.",
                     base_egg["type"],
                     base_egg["level"],
+                    merge_pair[0],
+                    merge_pair[1],
                 )
-                merge_count += 1
-                if current_task_payloads and not custom_reward_stop:
-                    current_task_payloads = self._fetch_task_categories(include_clan_tasks)
-                self.sleep_range(self.settings.after_egg_merge_delay_seconds)
+
+            if merge_succeeded:
                 continue
 
             level_12_standard = [
@@ -298,14 +377,14 @@ class EggService(GameService):
                     self.sleep_range(self.settings.after_feed_delay_seconds)
                     continue
 
-            if queue_eggs and not free_active_slots:
+            if queue_eggs and not free_active_slots and not rejected_pairs:
                 standard_eggs = [egg for egg in valid_eggs if _egg_type(egg) in {"DUCK", "HEART"}]
                 if standard_eggs:
                     sacrificial_egg = min(
                         standard_eggs,
                         key=lambda item: (
+                            _egg_type(item) != "HEART",
                             _egg_level(item),
-                            _egg_type(item) != "DUCK",
                             -_egg_slot(item),
                         ),
                     )
@@ -325,7 +404,7 @@ class EggService(GameService):
                         continue
 
             pending_cooldown_eggs = (
-                find_pending_cooldown_eggs(valid_eggs, current_ts)
+                find_pending_cooldown_eggs(all_available_eggs, current_ts)
                 if self.settings.features.participate_egg_tournaments
                 else []
             )
@@ -340,11 +419,19 @@ class EggService(GameService):
                 )
 
             if queue_eggs and not free_active_slots:
-                self.logger.info(
-                    "Дальнейшая обработка очереди остановлена: все открытые egg-слоты заняты, свободных слотов нет. Открытых слотов=%s, яиц в очереди=%s.",
-                    sorted(active_slot_set),
-                    len(queue_eggs),
-                )
+                if rejected_pairs:
+                    rejected_description = [f"{slot1}-{slot2}" for slot1, slot2 in sorted(rejected_pairs)]
+                    self.logger.info(
+                        "Дальнейшая обработка очереди остановлена: сервер отклонил merge для пар %s, поэтому аварийное вскрытие обычных яиц в этом цикле отменено. В очереди остается %s яиц.",
+                        rejected_description,
+                        len(queue_eggs),
+                    )
+                else:
+                    self.logger.info(
+                        "Дальнейшая обработка очереди остановлена: все открытые egg-слоты заняты, свободных слотов нет. Открытых слотов=%s, яиц в очереди=%s.",
+                        sorted(active_slot_set),
+                        len(queue_eggs),
+                    )
 
             break
 

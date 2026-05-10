@@ -334,3 +334,40 @@ class TaskHelpersTests(unittest.TestCase):
         slot_ids = pick_custom_task_slot_ids(task, eggs, max_merge_slot=25)
 
         self.assertIsNone(slot_ids)
+
+    def test_pick_custom_task_slot_ids_skips_tasks_that_require_only_levels_above_nine(self) -> None:
+        task = {
+            "code": "regTourMicroLegendary10",
+            "criteria": [
+                {
+                    "eggType": "DUCK",
+                    "eggLevel": [10],
+                    "value": 1,
+                }
+            ],
+        }
+        eggs = [{"slot": 133, "type": "DUCK", "level": 10}]
+
+        slot_ids = pick_custom_task_slot_ids(task, eggs, max_merge_slot=25)
+
+        self.assertIsNone(slot_ids)
+
+    def test_pick_custom_task_slot_ids_uses_only_allowed_levels_up_to_nine(self) -> None:
+        task = {
+            "code": "regTourMixed",
+            "criteria": [
+                {
+                    "eggType": "DUCK",
+                    "eggLevel": [9, 10],
+                    "value": 1,
+                }
+            ],
+        }
+        eggs = [
+            {"slot": 133, "type": "DUCK", "level": 9},
+            {"slot": 134, "type": "DUCK", "level": 10},
+        ]
+
+        slot_ids = pick_custom_task_slot_ids(task, eggs, max_merge_slot=25)
+
+        self.assertEqual(slot_ids, [133])
