@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 from duckbot.config import BreedRuleSettings, FeedRuleSettings
@@ -57,6 +58,15 @@ def resolve_breed_rule(duck: dict[str, Any], breed_rules: list[BreedRuleSettings
     return None
 
 
+def resolve_breed_cost(duck: dict[str, Any], currency: str) -> int | None:
+    """Возвращает стоимость скрещивания в нужной валюте, если сервер прислал ее в данных утки."""
+    for field_name in ("breedingPrice", "breedPrice", "breedCost", "price"):
+        cost = _extract_currency_amount(duck.get(field_name), currency)
+        if cost is not None:
+            return cost
+    return None
+
+
 def resolve_feed_rule(duck: dict[str, Any], feed_rules: list[FeedRuleSettings]) -> FeedRuleSettings | None:
     """Подбирает первое подходящее правило кормления для утки."""
     rarity = str(duck.get("quality") or "").upper()
@@ -74,6 +84,45 @@ def resolve_feed_rule(duck: dict[str, Any], feed_rules: list[FeedRuleSettings]) 
         if rule.max_level is not None and level > rule.max_level:
             continue
         return rule
+
+    return None
+
+
+def _extract_currency_amount(raw_value: Any, currency: str) -> int | None:
+    """Извлекает сумму из числа или объекта вида {"corn": 6000}."""
+    if isinstance(raw_value, bool):
+        return None
+
+    if isinstance(raw_value, int):
+        return raw_value if raw_value >= 0 else None
+
+    if isinstance(raw_value, float):
+        amount = int(raw_value)
+        return amount if amount >= 0 else None
+
+    if not isinstance(raw_value, Mapping):
+        return None
+
+    currency_value = raw_value.get(currency)
+    if isinstance(currency_value, bool):
+        return None
+    if isinstance(currency_value, int):
+        return currency_value if currency_value >= 0 else None
+    if isinstance(currency_value, float):
+        amount = int(currency_value)
+        return amount if amount >= 0 else None
+
+    value = raw_value.get("value")
+    raw_currency = raw_value.get("currency")
+    if raw_currency is not None and str(raw_currency).strip().lower() != currency:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        amount = int(value)
+        return amount if amount >= 0 else None
 
     return None
 
@@ -190,11 +239,55 @@ class DuckService(GameService):
                 )
                 return True
 
-            pay_response = self.safe_post(
-                "/ducks/breed/pay",
-                {"id": duck_id, "currency": breed_rule.currency},
-            )
+            breed_cost = resolve_breed_cost(duck, breed_rule.currency)
+            if breed_rule.currency == "corn" and breed_cost is not None and player_context.corn < breed_cost:
+                self.logger.info(
+                    "Пропустили скрещивание утки %s: нужно %s corn, доступно %s corn.",
+                    duck_id,
+                    breed_cost,
+                    player_context.corn,
+                )
+                return True
+
+            pay_response, stop_reason = self._breed_duck_once(duck_id, breed_rule.currency)
+            if stop_reason == "MONEY":
+                self._refresh_player_corn(player_context)
+                if breed_rule.currency == "corn":
+                    if breed_cost is not None:
+                        self.logger.info(
+                            "Пропустили скрещивание утки %s: сервер вернул MONEY, нужно %s corn, доступно %s corn.",
+                            duck_id,
+                            breed_cost,
+                            player_context.corn,
+                        )
+                    else:
+                        self.logger.info(
+                            "Пропустили скрещивание утки %s: сервер вернул MONEY, доступно %s corn.",
+                            duck_id,
+                            player_context.corn,
+                        )
+                else:
+                    self.logger.info(
+                        "Пропустили скрещивание утки %s: сервер вернул MONEY для валюты %s.",
+                        duck_id,
+                        breed_rule.currency,
+                    )
+                return True
+
+            if stop_reason:
+                self.logger.info(
+                    "Остановили скрещивание утки %s: сервер сменил состояние (%s).",
+                    duck_id,
+                    stop_reason,
+                )
+                return True
+
             if pay_response:
+                if breed_rule.currency == "corn":
+                    if breed_cost is not None:
+                        player_context.corn = max(player_context.corn - breed_cost, 0)
+                    else:
+                        self._refresh_player_corn(player_context)
                 self.logger.info(
                     "Отправили утку %s на скрещивание по правилу %s [%s-%s], валюта=%s",
                     duck_id,
@@ -207,6 +300,46 @@ class DuckService(GameService):
             return True
 
         return True
+
+    def _breed_duck_once(
+        self,
+        duck_id: int | None,
+        currency: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            response = self.api_client.post(
+                "/ducks/breed/pay",
+                {"id": duck_id, "currency": currency},
+            )
+            return response, None
+        except ApiResponseError as exc:
+            if exc.error_code in {"MONEY", "error_duck_bad_state", "error_slot_not_available"}:
+                return None, exc.error_code
+            self.logger.error("Вызов /ducks/breed/pay завершился ошибкой: %s", exc)
+            return None, None
+        except ApiError as exc:
+            self.logger.error("Вызов /ducks/breed/pay завершился ошибкой: %s", exc)
+            return None, None
+
+    def _refresh_player_corn(self, player_context: PlayerContext) -> int | None:
+        player_data = self.safe_post("/player/me")
+        if not player_data:
+            return None
+
+        response = player_data.get("response")
+        if not isinstance(response, Mapping):
+            return None
+
+        player = response.get("player")
+        if not isinstance(player, Mapping):
+            return None
+
+        corn = player.get("corn")
+        if isinstance(corn, bool) or not isinstance(corn, (int, float)):
+            return None
+
+        player_context.corn = int(corn)
+        return player_context.corn
 
     def _feed_duck_once(self, duck_id: int | None) -> tuple[dict[str, Any] | None, str | None]:
         try:

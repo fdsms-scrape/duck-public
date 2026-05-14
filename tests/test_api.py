@@ -149,3 +149,38 @@ class ApiClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.error_code, "error_duck_bad_state")
         self.assertEqual(len(session.calls), 1)
         self.assertEqual(sleep_calls, [])
+
+    def test_client_does_not_retry_money_business_error_under_500(self) -> None:
+        auth_manager = StubAuthManager()
+        session = FakeSession(
+            [
+                FakeResponse(500, {"result": False, "error": "MONEY"}),
+                FakeResponse(200, {"result": True, "response": {"ok": True}}),
+            ]
+        )
+        sleep_calls: list[float] = []
+        logger = type(
+            "Logger",
+            (),
+            {
+                "debug": lambda *a, **k: None,
+                "warning": lambda *a, **k: None,
+            },
+        )()
+        client = DuckApiClient(
+            session=session,
+            api_base_url="https://api.duckmyduck.com",
+            header_builder=HeaderBuilder(),
+            auth_manager=auth_manager,
+            retry_settings=RetrySettings(max_attempts=3, base_delay_seconds=2, rate_limit_multiplier=5),
+            timeout_seconds=15,
+            logger=logger,
+            sleep_func=sleep_calls.append,
+        )
+
+        with self.assertRaises(ApiResponseError) as raised:
+            client.post("/ducks/breed/pay", {"id": 1, "currency": "corn"})
+
+        self.assertEqual(raised.exception.error_code, "MONEY")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(sleep_calls, [])

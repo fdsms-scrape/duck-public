@@ -15,6 +15,8 @@ from duckbot.http.auth_manager import AuthManager
 from duckbot.http.header_builder import HeaderBuilder
 from duckbot.masking import sanitize_value
 
+NON_RETRYABLE_SERVER_ERROR_CODES = frozenset({"MONEY"})
+
 
 class DuckApiClient:
     """Клиент API для одного профиля с повторами и обновлением токена."""
@@ -173,7 +175,7 @@ class DuckApiClient:
         if error_code == "UNKNOWN":
             return None
 
-        if not error_code.startswith("error_"):
+        if error_code not in NON_RETRYABLE_SERVER_ERROR_CODES and not error_code.startswith("error_"):
             return None
 
         return ApiResponseError(
